@@ -53,15 +53,42 @@ def transform(data):
 @task
 def load(data):
     
-    import pandas as pd
+    import sqlite3 as sqlite
     from airflow.operators.python import get_current_context
     
-    logs.info('Writing to csv file')
-    df = pd.DataFrame(data,columns=['id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at'])
     context = get_current_context()
-    snapshot_time = context['ti'].run_id.replace(':','').replace('+','').replace('-','')
-    logs.info(f"Writing to file: /tmp/crypto_snapshot_{snapshot_time}.csv")
-    df.to_csv(f'/tmp/crypto_snapshot_{snapshot_time}.csv',index=False)
+    run_id = context['ti'].run_id.replace(':','').replace('+','').replace('-','')
+    logs.info("Creating sqlite connection")
+    conn = sqlite.connect('/tmp/crypto.db')
+    logs.info("Connection setup completed")
+    cursor = conn.cursor()
+    
+    sql_script = """
+        CREATE TABLE IF NOT EXISTS CRYPTO_SNAPSHOTS(
+            id varchar,
+            run_id varchar,
+            symbol varchar,
+            current_price decimal, 
+            market_cap decimal,
+            price_change_percentage_24h decimal, 
+            extracted_at text,
+            UNIQUE(id, run_id)
+        )      
+    """
+    logs.info("creating table if not exists")
+    cursor.executescript(sql_script)
+    
+    logs.info("Insert into table")
+    for records in data:
+        cursor.execute(
+            "INSERT OR IGNORE INTO crypto_snapshots VALUES (?,?,?,?,?,?,?)",
+            (records['id'], run_id, records['symbol'], records['current_price'],records['market_cap'], records['price_change_percentage_24h'], records['extracted_at'])
+        )
+
+    conn.commit()
+    conn.close()
+    
+    # df.to_csv(f'/tmp/crypto_snapshot_{snapshot_time}.csv',index=False)
     
 with DAG(
     dag_id = 'task_dag',
