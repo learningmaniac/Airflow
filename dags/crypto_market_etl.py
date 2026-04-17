@@ -9,14 +9,16 @@ logs = logging.getLogger(__name__)
 def on_failure_callback(context):
     task_id = context['task_instance'].task_id
     dag_id = context['task_instance'].dag_id
-    execution_date = context['execution_date']
-    logs.error(f"Task {task_id} failed on DAG {dag_id} at {execution_date}")
+    logical_date = context['logical_date']
+    logs.error(f"Task {task_id} failed on DAG {dag_id} at {logical_date}")
 
 @task(retries = 2, retry_delay=datetime.timedelta(seconds = 30), on_failure_callback=on_failure_callback)
 def extract():
     
     import requests as req
     from airflow.models import Variable
+    from airflow.operators.python import get_current_context
+
     
     crypto_value = Variable.get('crypto_currency',default_var='usd')
     logs.info('Calling API')
@@ -25,9 +27,12 @@ def extract():
         raise Exception(f"API returned status {response.status_code}") 
     logs.info('API Called Successfull')
     data = response.json()
-    extracted_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    
+    context = get_current_context()
+    logical_date = context['logical_date'].isoformat()
+    
     for record in data:
-        record['extracted_at'] = extracted_at
+        record['extracted_at'] = logical_date
     return data
     
 
@@ -38,9 +43,18 @@ def transform(data):
     import math 
     
     logs.info('Transforming data')
+    needed_column = {'id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at'}
+    actual_column = set(data[0].keys())
     
-    df = pd.DataFrame(data, columns=['id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at'])
+    missing_column = set(needed_column - actual_column)
+    
+    if missing_column:
+        raise Exception(f"Schema changed, Missing Columns : {missing_column}")    
+    
         
+    df = pd.DataFrame(data, columns= ['id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at'])
+ 
+      
     dt = df.to_dict(orient='records')
     
     for records in dt:
@@ -58,37 +72,40 @@ def load(data):
     
     context = get_current_context()
     run_id = context['ti'].run_id.replace(':','').replace('+','').replace('-','')
+    
     logs.info("Creating sqlite connection")
     conn = sqlite.connect('/tmp/crypto.db')
     logs.info("Connection setup completed")
-    cursor = conn.cursor()
     
-    sql_script = """
-        CREATE TABLE IF NOT EXISTS CRYPTO_SNAPSHOTS(
-            id varchar,
-            run_id varchar,
-            symbol varchar,
-            current_price decimal, 
-            market_cap decimal,
-            price_change_percentage_24h decimal, 
-            extracted_at text,
-            UNIQUE(id, run_id)
-        )      
-    """
-    logs.info("creating table if not exists")
-    cursor.executescript(sql_script)
-    
-    logs.info("Insert into table")
-    for records in data:
-        cursor.execute(
-            "INSERT OR IGNORE INTO crypto_snapshots VALUES (?,?,?,?,?,?,?)",
-            (records['id'], run_id, records['symbol'], records['current_price'],records['market_cap'], records['price_change_percentage_24h'], records['extracted_at'])
-        )
+    try:
+        cursor = conn.cursor()
+        sql_script = """
+            CREATE TABLE IF NOT EXISTS CRYPTO_SNAPSHOTS(
+                id varchar,
+                run_id varchar,
+                symbol varchar,
+                current_price decimal, 
+                market_cap decimal,
+                price_change_percentage_24h decimal, 
+                extracted_at text,
+                UNIQUE(id, run_id)
+            )      
+        """
+        logs.info("creating table if not exists")
+        cursor.execute(sql_script)
+        
+        
+        logs.info("Insert into table")
+        for records in data:
+            cursor.execute(
+                "INSERT OR IGNORE INTO crypto_snapshots VALUES (?,?,?,?,?,?,?)",
+                (records['id'], run_id, records['symbol'], records['current_price'],records['market_cap'], records['price_change_percentage_24h'], records['extracted_at'])
+            )
 
-    conn.commit()
-    conn.close()
+        conn.commit
+    finally:
+        conn.close()
     
-    # df.to_csv(f'/tmp/crypto_snapshot_{snapshot_time}.csv',index=False)
     
 with DAG(
     dag_id = 'task_dag',
