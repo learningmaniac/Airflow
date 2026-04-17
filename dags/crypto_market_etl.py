@@ -1,6 +1,7 @@
 from airflow import DAG
 import logging
 from airflow.decorators import task
+from airflow.providers.standard.operators.bash import BashOperator
 import datetime as datetime
 
 
@@ -102,7 +103,7 @@ def load(data):
                 (records['id'], run_id, records['symbol'], records['current_price'],records['market_cap'], records['price_change_percentage_24h'], records['extracted_at'])
             )
 
-        conn.commit
+        conn.commit()
     finally:
         conn.close()
     
@@ -113,5 +114,14 @@ with DAG(
     schedule = None,
     catchup = False 
 ) as dag:
-    load(transform(extract()))
+    
+    archive = BashOperator(
+        task_id = 'archive',
+        bash_command = 'echo "Pipeline complete"'
+    )
+    
+    extracted_data = extract()
+    transformed_data = transform(extracted_data)
+    loaded_data = load(transformed_data)
+    loaded_data >> archive
 
