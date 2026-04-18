@@ -2,6 +2,7 @@ from airflow import DAG
 import logging
 from airflow.decorators import task
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.sensors.filesystem import FileSensor
 import datetime as datetime
 
 
@@ -70,12 +71,15 @@ def load(data):
     
     import sqlite3 as sqlite
     from airflow.operators.python import get_current_context
+    from airflow.models import Variable
     
     context = get_current_context()
     run_id = context['ti'].run_id.replace(':','').replace('+','').replace('-','')
     
+    database_file_path = Variable.get('database_file_path', default_var='/tmp/crypto.db')
+    
     logs.info("Creating sqlite connection")
-    conn = sqlite.connect('/tmp/crypto.db')
+    conn = sqlite.connect(database_file_path)
     logs.info("Connection setup completed")
     
     try:
@@ -120,8 +124,16 @@ with DAG(
         bash_command = 'echo "Pipeline complete"'
     )
     
+    wait_for_file = FileSensor(
+        task_id = 'wait_for_file',
+        filepath = '/tmp/run_trigger.txt',
+        mode = 'poke',
+        poke_interval = 30,
+        timeout = 300
+    )
+    
     extracted_data = extract()
     transformed_data = transform(extracted_data)
     loaded_data = load(transformed_data)
-    loaded_data >> archive
+    wait_for_file >> extracted_data >> transformed_data >> loaded_data >> archive
 
