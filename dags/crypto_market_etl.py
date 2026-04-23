@@ -45,25 +45,29 @@ def transform(data):
     import math 
     
     logs.info('Transforming data')
-    needed_column = {'id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at'}
-    actual_column = set(data[0].keys())
+    needed_columns = ['id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at']
+    missing = set(needed_columns) - set(data[0].keys())
+    if missing:
+        raise Exception(f"Schema changed, Missing Columns: {missing}")
     
-    missing_column = set(needed_column - actual_column)
     
-    if missing_column:
-        raise Exception(f"Schema changed, Missing Columns : {missing_column}")    
-    
-        
-    df = pd.DataFrame(data, columns= ['id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at'])
- 
-      
-    dt = df.to_dict(orient='records')
+    needed_keys = ['id', 'symbol', 'current_price', 'market_cap', 'price_change_percentage_24h', 'extracted_at']
+    dt = [{k: r[k] for k in needed_keys} for r in data]
     
     for records in dt:
+        
         val = records['price_change_percentage_24h']
         if isinstance(val,float) and math.isnan(val):
             records['price_change_percentage_24h'] = None
-    
+        
+        market_cap = records['market_cap']
+        if market_cap > 1e10:
+            records['market_cap_tier'] = 'large_cap'
+        elif market_cap > 1e9:
+            records['market_cap_tier'] = 'mid_cap'
+        else:
+            records['market_cap_tier'] = 'small_cap'
+            
     return dt
 
 @task
@@ -91,6 +95,7 @@ def load(data):
                 symbol varchar,
                 current_price decimal, 
                 market_cap decimal,
+                market_cap_tier varchar,
                 price_change_percentage_24h decimal, 
                 extracted_at text,
                 UNIQUE(id, run_id)
@@ -103,13 +108,47 @@ def load(data):
         logs.info("Insert into table")
         for records in data:
             cursor.execute(
-                "INSERT OR IGNORE INTO crypto_snapshots VALUES (?,?,?,?,?,?,?)",
-                (records['id'], run_id, records['symbol'], records['current_price'],records['market_cap'], records['price_change_percentage_24h'], records['extracted_at'])
+                "INSERT OR IGNORE INTO crypto_snapshots VALUES (?,?,?,?,?,?,?,?)",
+                (records['id'], run_id, records['symbol'], records['current_price'],records['market_cap'], records['market_cap_tier'], records['price_change_percentage_24h'], records['extracted_at'])
             )
-
+                
         conn.commit()
     finally:
         conn.close()
+        
+@task
+def quality_check():
+    import sqlite3 as sqlite
+    from airflow.models import Variable
+    from airflow.operators.python import get_current_context
+    
+    
+    database_file_path = Variable.get('database_file_path', default_var='/tmp/crypto.db')
+    conn = sqlite.connect(database_file_path)
+    
+    try:
+        
+        cursor = conn.cursor()
+        
+        run_id = get_current_context()['ti'].run_id.replace(':','').replace('+','').replace('-','')
+        
+        cnt_run_id = cursor.execute("SELECT COUNT(*) FROM crypto_snapshots WHERE run_id = ?", (run_id,)).fetchone()[0]
+        
+        if cnt_run_id != 10:
+            raise Exception(f"Data quality check failed, only {cnt_run_id} records inserted for run_id {run_id}")
+        
+        cnt_null_current_price = cursor.execute("SELECT COUNT(*) FROM crypto_snapshots WHERE run_id = ? AND current_price IS NULL", (run_id,)).fetchone()[0]
+        
+        if cnt_null_current_price > 0:
+            raise Exception(f"Data quality check failed, {cnt_null_current_price} records have null current_price for run_id {run_id}")
+        
+        cnt_exceptions_category = cursor.execute("SELECT COUNT(*) FROM crypto_snapshots WHERE run_id = ? AND market_cap_tier NOT IN ('large_cap', 'mid_cap', 'small_cap')", (run_id,)).fetchone()[0]
+        
+        if cnt_exceptions_category > 0:
+            raise Exception(f"Data quality check failed, {cnt_exceptions_category} records have invalid market_cap_tier for run_id {run_id}")
+    finally:
+        conn.close()
+    
     
     
 with DAG(
@@ -135,5 +174,6 @@ with DAG(
     extracted_data = extract()
     transformed_data = transform(extracted_data)
     loaded_data = load(transformed_data)
-    wait_for_file >> extracted_data >> transformed_data >> loaded_data >> archive
+    quality_check_result = quality_check()
+    wait_for_file >> extracted_data >> transformed_data >> loaded_data >> quality_check_result >> archive
 
