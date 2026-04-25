@@ -4,6 +4,9 @@ from airflow.decorators import task
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.sensors.filesystem import FileSensor
 import datetime as datetime
+from airflow.sdk import Asset
+
+crypto_dataset = Asset("sqlite:///tmp/crypto.db")
 
 
 logs = logging.getLogger(__name__)
@@ -116,7 +119,7 @@ def load(data):
     finally:
         conn.close()
         
-@task
+@task(outlets=[crypto_dataset])
 def quality_check():
     import sqlite3 as sqlite
     from airflow.models import Variable
